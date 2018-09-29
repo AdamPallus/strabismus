@@ -1,0 +1,570 @@
+---
+title: "SOA strabismus bootstrap"
+output: html_notebook
+---
+
+In this report, I am using bootstrap confidence intervals to determine whether the velocity term is significant
+
+```{r setup, warning=FALSE,message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(broom)
+library(knitr)
+library(tidyr)
+source('Adamhelperfunctions.R')
+
+
+preparetoBOOTmarksaccs<- function(z){
+  
+  calc.saccade.type<- function(z,window.size=5){
+  
+    #little helper function to assign the correct saccade type
+    #based on the measurements. 
+    #More robust than using replace since we can do logic
+    
+    #For the normal monkey, I don't always have the target position information.
+    #We should assume the normal monkey is making conjugate saccades
+    #I'll have to update this with the names of other normal monkeys
+    if (first(z$monkey) %in% c('Bee','Ozette')){
+      z$saccade.type=as.factor('conjugate')
+      return(z)
+    }
+    
+    
+    left.eye.on.start=first(z$pre.l.distance<window.size)
+    right.eye.on.start=first(z$pre.r.distance<window.size)
+    left.eye.on.end=first(z$post.l.distance<window.size)
+    right.eye.on.end=first(z$post.r.distance<window.size)
+    
+    left.eye.saccade=left.eye.on.start & left.eye.on.end
+    right.eye.saccade=right.eye.on.start & right.eye.on.end
+    
+    left.to.right=left.eye.on.start & right.eye.on.end & !right.eye.on.start
+    right.to.left=right.eye.on.start & left.eye.on.end & !left.eye.on.start
+    
+    conjugate=left.eye.saccade & right.eye.saccade
+    
+    
+    if (conjugate){
+      saccade.type='conjugate'
+    }else if (left.eye.saccade){
+      saccade.type='left.only'
+    } else if (right.eye.saccade) {
+      saccade.type='right.only'
+    }else if (left.to.right){
+      saccade.type='left.to.right'
+    }else if (right.to.left) {
+      saccade.type='right.to.left'
+    }else{
+      saccade.type='off.target'
+    }
+    
+    z$saccade.type=as.factor(saccade.type)
+    return(z)
+  }  
+  
+  z %>% 
+    group_by(neuron) %>%
+    mutate(lev=parabolicdiff(lep,20),
+           rev=parabolicdiff(rep,20),
+           levV=parabolicdiff(lepV,20),
+           revV=parabolicdiff(repV,20),
+           sdf=spikedensity(rasters,10),
+           conj.vertical=(repV+lepV)/2,
+           verg.velocity=lev-rev,
+           conj.velocity=sqrt(((rev+lev)/2)^2+((revV+levV)/2)^2),
+           right.eye.distance=(sqrt((rep-thp)^2+(repV-tvp)^2)),
+           left.eye.distance=sqrt((lep-thp)^2+(lepV-tvp)^2),
+           sdf20=lag(sdf,20),
+           sacnum=markSaccadesDouble(conj.velocity,threshold1=50,threshold2=10,min.dur=20,
+                                     driftcorrect = TRUE,markFixations = FALSE))->
+    z
+  
+  
+  z %>%
+    filter(!is.na(sacnum)) %>%
+    group_by(sacnum) %>%
+    mutate(saccade.onset=first(time)) %>%
+    filter(saccade.onset>500) %>%
+    mutate(
+      pre.l.distance=z$left.eye.distance[z$time==(saccade.onset-500)],
+      pre.r.distance=z$right.eye.distance[z$time==(saccade.onset-500)],
+      post.l.distance=last(left.eye.distance),
+      post.r.distance=last(right.eye.distance),
+      saccade.dur=n(), #was originally a summary
+      R.H.Amp=last(rep)-first(rep),
+      L.H.Amp=last(lep)-first(lep),
+      R.V.Amp=last(repV)-first(repV),
+      L.V.Amp=last(lepV)-first(lepV),
+      r.angle=atan2(R.V.Amp,R.H.Amp)*180/pi)->
+    z
+  
+  z %>%
+    group_by(sacnum) %>%
+    do(calc.saccade.type(.))->
+    z
+}
+
+bootstrapSaccades<- function(n,z){
+  samp<-        sample(unique(z$sacnum[z$saccade.type=='left.only']),
+                length(unique(z$sacnum[z$saccade.type=='left.only'])),replace=TRUE)
+  
+  samp<- c(samp,sample(unique(z$sacnum[z$saccade.type=='right.only']),
+                length(unique(z$sacnum[z$saccade.type=='right.only'])),replace=TRUE))
+  
+  samp<- c(samp,sample(unique(z$sacnum[z$saccade.type=='conjugate']),
+                length(unique(z$sacnum[z$saccade.type=='conjugate'])),replace=TRUE))
+  
+  #convert to data.table for faster processing
+  z <- as.data.table(z)
+  setkey(z, "sacnum") #like group_by
+  # create the new data set
+  z <- z[J(samp), allow.cartesian = TRUE] #replicate data set based on above sample 
+  
+  z %>% #make the model
+    # filter(abs(verg.velocity)<200) %>%
+    # do(tidy(lm(sdf20~verg.angle+verg.velocity,data=.))) %>%
+    do(tidy(lm(sdf20~verg.angle+verg.velocity+conj.vertical,data=.))) %>%
+    # do(tidy(lm(sdf20~lep+rep+lev+rev,data=.))) %>%
+    mutate(repN=n)-> #add the number of the bootstrap iteration. 
+    z
+}
+
+
+
+```
+
+```{r}
+# t<- loadnewcsv2(path="C:/Users/setup/Desktop/NRTP Vergence/SOASTRAB/bootstraptest/")
+# t<- loadnewcsv2(path="C:/Users/setup/Desktop/NRTP Vergence/SOA Strabismus/")
+
+t<- readRDS('SOAstrabALL.RDS')
+
+t<- readRDS('SOAnormalANDstrabismus.RDS')
+
+```
+
+
+
+```{r,warning=FALSE}
+nreps=1999 #number of bootstrap iterations
+
+SaccadesBootstrap <- function(z,n=1999){
+  n<- matrix(1:n)
+  neuronName<- z$neuron[1]
+  message(paste('Processing: ',neuronName))
+  if (nrow(z)>0){
+    if (length(unique(z$sacnum))>10){
+      message('Bootstrapping... ')
+      x<- as.data.frame(rbindlist(lapply(n,bootstrapSaccades,z))) #calls the function n times
+      x<- mutate(x,neuron=neuronName) 
+    }else{
+      message('Not enough movements!')
+      x<-data.frame()
+    }
+  }else{
+    message('No good saccades at all!')
+    x<-data.frame()
+  }
+  x
+}
+
+bootstrap.ci<- function(xx){
+  xx %>%
+    group_by(neuron,term) %>%
+    summarize(ciLOW=quantile(estimate,probs=0.025),
+              ciHIGH=quantile(estimate,probs=0.975),
+              m=median(estimate)) %>%
+    mutate(zerocross=(ciLOW*ciHIGH)<0)->
+    confints
+  
+  confints %>%
+    select(neuron,term,m) %>%
+    spread(term,m)->
+    ciplot
+  
+  confints %>%
+    select(neuron,term,ciLOW) %>%
+    spread(term,ciLOW)->
+    ci.low
+  names(ci.low)<-paste(names(ci.low),'low',sep='.')
+  
+  confints %>%
+    select(neuron,term,ciHIGH) %>%
+    spread(term,ciHIGH)->
+    ci.high
+  names(ci.high)<-paste(names(ci.high),'high',sep='.')
+  
+  ciplot<-cbind(ciplot,ci.low,ci.high)
+  
+  ciplot %>%
+    separate(neuron,c('monkey','cellnum'),remove=FALSE) %>%
+    mutate(strabismic=monkey %in% c('Kopachuck','Pilchuck','Patos','QT'),
+           exo=monkey %in% c('Pilchuck','Patos'),
+           eso= strabismic & !exo)->
+    ciplot
+}
+
+t %>%
+  group_by(neuron) %>%
+  mutate(time=row_number()) %>%
+  do(preparetoBOOTmarksaccs(.)) ->
+  preparedtoBOOT
+
+# preparedtoBOOT %>%
+#   group_by(neuron) %>%
+#   summarize(nmvt=length(unique(sacnum)),
+#             monkey=first(monkey)) %>%
+#   mutate(strabismic=monkey %in% c('Kopachuck','Pilchuck','Patos','QT'),
+#          exo=monkey %in% c('Pilchuck','Patos'),
+#          eso= strabismic & !exo)->
+#   mvtcount
+# 
+# ggplot(mvtcount) +
+#   geom_histogram(aes(nmvt,fill=strabismic),position='dodge')+
+#   theme_minimal()+
+#   xlab('Number of Slow Vergence Movements per Neuron')
+# 
+# preparedtoBOOT %>%
+#   group_by(monkey,neuron,slowverg) %>%
+#   summarize(peak.verg.velocity=maxabs(verg.velocity),
+#             verg.amp=last(verg.angle)-first(verg.angle)) %>%
+#   mutate(strabismic=monkey %in% c('Kopachuck','Pilchuck','Patos','QT'),
+#          exo=monkey %in% c('Pilchuck','Patos'),
+#          eso= strabismic & !exo)->
+#   mvtsummary
+# 
+# ggplot(mvtsummary)+
+#   geom_histogram(aes(verg.amp,fill=strabismic),position='dodge')+
+#   theme_minimal()+
+#   xlab('Amplitude of Slow Vergence Movement')
+
+
+
+preparedtoBOOT%>%
+  group_by(neuron) %>%
+  do(SaccadesBootstrap(.,nreps)) ->
+  xx
+
+saveRDS(xx,'BootstrapSaccadesBoth3-12-2018.RDS')
+
+preparedtoBOOT%>%
+  filter(saccade.type == 'left.only') %>%
+  group_by(neuron) %>%
+  do(SaccadesBootstrap(.,nreps)) ->
+  xxLEFT
+
+saveRDS(xxLEFT,'BootstrapSaccadesLEFT3-12-2018.RDS')
+
+
+
+preparedtoBOOT%>%
+  filter(saccade.type=='right.only') %>%
+  group_by(neuron) %>%
+  do(SaccadesBootstrap(.,nreps)) ->
+  xxRIGHT
+
+saveRDS(xxRIGHT,'BootstrapSaccadesRIGHT3-12-2018.RDS')
+
+# 
+ciplot<-bootstrap.ci(xx)
+# ciplot<-bootstrap.ci(xxLEFT)
+# ciplot<-bootstrap.ci(xxRIGHT)
+
+```
+
+
+```{r}
+ggplotly(
+ggplot(ciplot,aes(verg.velocity,verg.angle))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  geom_text(aes(label=neuron))
+)
+
+ggplotly(
+ggplot(ciplot,aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')
+)
+
+ggplotly(
+  ciplot %>%
+    filter((verg.velocity.high*verg.velocity.low)>0) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')
+)
+
+ggplotly(
+  ciplot %>%
+    # filter((verg.velocity.high*verg.velocity.low)>0) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high,color=strabismic),
+                size=0.5,width=0,alpha=0.2)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high,color=strabismic),
+                 height=0,size=0.5,alpha=0.2)+
+  geom_point(size=1,aes(color=strabismic))+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')
+)
+
+ggplotly(
+  ciplot %>%
+    filter((verg.velocity.high*verg.velocity.low)>0) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high,color=strabismic),
+                size=0.5,width=0,alpha=0.2)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high,color=strabismic),
+                 height=0,size=0.5,alpha=0.2)+
+  geom_point(size=1,aes(color=strabismic))+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')
+)
+
+ggplotly(
+  ciplot %>%
+    filter((verg.velocity.high*verg.velocity.low)<0) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high,color=strabismic),
+                size=0.5,width=0,alpha=0.2)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high,color=strabismic),
+                 height=0,size=0.5,alpha=0.2)+
+  geom_point(size=1,aes(color=strabismic))+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')
+)
+ kable(select(ciplot,neuron,verg.velocity.low,verg.velocity.high))
+```
+
+```{r}
+
+ciplot %>%
+   filter((verg.velocity.high*verg.velocity.low)>0) %>%
+  mutate(median.velocity= verg.velocity) %>%
+  select(verg.velocity.low,median.velocity,verg.velocity.high) %>%
+  separate(neuron,c('monkey','cellnum'),remove=FALSE)->
+  signifplot
+
+  kable(select(signifplot,-monkey))
+
+ggplotly(
+  ggplot(signifplot)+
+    geom_histogram(aes(abs(median.velocity),fill=monkey))
+)
+
+ggplot(signifplot)+
+    geom_histogram(aes(abs(median.velocity),fill=monkey))+
+  xlab('Sensitivity to vergence velocity
+(median from bootstrap distribution - (spk/s)/(deg/s)
+       Only cells with significant sensitivities shown')+
+  ggtitle('SOA Strabismus slow vergence movement model fits')
+
+```
+
+
+
+
+
+
+
+#old
+
+```{r}
+
+ggplot(ciplot,aes(verg.velocity,verg.angle))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  geom_text(aes(label=neuron))
+
+ggplot(ciplot,aes(verg.velocity,verg.angle))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')
+
+ kable(select(ciplot,neuron,verg.velocity.low,verg.velocity.high))
+ 
+ ciplot %>%
+   filter(verg.velocity.low*verg.velocity.high>0)%>%
+   ggplot(aes(verg.velocity,verg.angle))+
+   geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+   geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+   geom_point(size=1,color='hotpink')+
+   geom_vline(xintercept = 0)+
+   # coord_fixed()+
+   # geom_text(aes(label=neuron))+
+   theme_minimal()+
+   xlab('Sensitivity to Vergence Velocity')+
+   ylab('Sensitivity to Vergence Angle')+
+  geom_text(aes(label=neuron))
+```
+
+```{r}
+#Bootstrap Histogram----
+chosenCell='QT-101'
+
+x<- filter(xx,neuron=='QT-101')
+
+ciplot %>%
+  filter(neuron==chosenCell) %>%
+  select(neuron,verg.velocity.low,verg.velocity.high) ->
+  bootplot
+
+qplot(data=filter(x,term %in% c('verg.angle','verg.velocity')),
+      estimate,binwidth=0.005,fill=term)
+
+qplot(data=filter(x,term %in% c('verg.velocity')),
+      estimate,binwidth=0.005,fill=term)
+
+
+x$term<- as.factor(x$term)
+levels(x$term)<-c('b','Vergence Angle','Vergence Velocity')
+
+#get ciplot from next section
+ggplot(filter(x,term %in% c('Vergence Velocity')))+
+  geom_histogram(aes(estimate,fill=term),
+                 binwidth=0.01,
+                 color='white',
+                 size=0.5)+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity (spk/s)/(deg/s)')+
+  ylab('Number of Bootstrap Iterations')+
+  # geom_segment(aes(x=verg.velocity.low,xend=verg.velocity.high),data=bootplot,
+  #              y=-10,yend=-10,size=3,color='#00BFC4')+
+  geom_segment(aes(x=verg.velocity.low,xend=verg.velocity.high),data=bootplot,
+               y=-10,yend=-10,size=3,color='#F8766D')+
+  theme(legend.position=c(0.7,0.5),
+        legend.title=element_blank())+
+  ggtitle(paste0(chosenCell,' Bootstrap Confidence Interval'))
+```
+
+```{r,warning=FALSE}
+nreps=1999 #number of bootstrap iterations
+n<- matrix(1:nreps) #set this up in the proper form to work with apply below
+# t<- readRDS('SOA.RDS')
+
+neurons=unique(t$neuron)
+# neurons='Patos-101'
+neurons<- unique(filter(t,monkey!='Kopachuck')$neuron)
+xx<- NULL
+
+for (i in 1:length(neurons)){
+  # for(i in 1:2){
+  message(paste('Processing: ',neurons[i]))
+  z <- filter(t,neuron==neurons[i])
+  z<-preparetoBOOTslow(z) #marks and measures saccades
+  if (nrow(z)>0){
+    message(paste('Bootstrapping...: ',neurons[i]))
+    x<- as.data.frame(rbindlist(lapply(n,bootstrapSlowverg,z))) #calls the function n times
+    x<- mutate(x,neuron=neurons[i]) 
+    xx[[i]]<- x #add to list for combining in next phase
+  }else{
+    message(paste('No Slow Verg: ',neurons[i]))
+  }
+}
+
+xx<- rbindlist(xx) #combine efficiently (from data.table)
+
+# saveRDS(xx,'SOA simple Bootstrap analysis 1999reps.RDS')
+xx %>%
+  group_by(neuron,term) %>%
+  summarize(ciLOW=quantile(estimate,probs=0.025),
+            ciHIGH=quantile(estimate,probs=0.975),
+            m=mean(estimate)) %>%
+  mutate(zerocross=(ciLOW*ciHIGH)<0)->
+  confints
+
+confints %>%
+  select(neuron,term,m) %>%
+  spread(term,m)->
+  ciplot
+
+confints %>%
+  select(neuron,term,ciLOW) %>%
+  spread(term,ciLOW)->
+  ci.low
+names(ci.low)<-paste(names(ci.low),'low',sep='.')
+
+confints %>%
+  select(neuron,term,ciHIGH) %>%
+  spread(term,ciHIGH)->
+  ci.high
+names(ci.high)<-paste(names(ci.high),'high',sep='.')
+
+ciplot<-cbind(ciplot,ci.low,ci.high)
+```
+
+```{r}
+
+ggplot(ciplot,aes(verg.velocity,verg.angle))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  geom_text(aes(label=neuron))
+
+ggplot(ciplot,aes(verg.velocity,verg.angle))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')
+
+ kable(select(ciplot,neuron,verg.velocity.low,verg.velocity.high))
+```

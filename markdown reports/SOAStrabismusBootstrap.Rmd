@@ -1,0 +1,473 @@
+---
+title: "SOA strabismus bootstrap"
+output: html_notebook
+---
+
+In this report, I am using bootstrap confidence intervals to determine whether the velocity term is significant
+
+```{r setup, warning=FALSE,message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(data.table)
+library(broom)
+library(knitr)
+source('Adamhelperfunctions.R')
+
+preparetoBOOTmarksaccs<- function(z){
+  
+  z%>% #this block smooths out velocity traces
+    mutate(#lev=parabolicdiff(lep,20),
+           #rev=parabolicdiff(rep,20),
+           #levV=parabolicdiff(lepV,20),
+           #revV=parabolicdiff(repV,20),
+           sdf=spikedensity(rasters,10),
+           #verg.velocity=lev-rev,
+           conj.velocity=sqrt(((rev+lev)/2)^2+((revV+levV)/2)^2))->
+    z
+  
+  bufferlength=100
+  saccade.length=150
+  d=10
+  
+  z %>% #this is just one neuron's worth of data
+    mutate(sdf20=lag(sdf,d),
+           time=row_number()) %>%
+    mutate(realsaccade=markSaccades(conj.velocity,buffer=15,threshold=20)>0)%>%
+    do(joinsaccadesuniform(.,buffer=bufferlength,threshold=20,saccade.length=saccade.length))%>%
+    group_by(sacnum) %>%
+    # mutate(realsaccade=counter>bufferlength & counter< bufferlength + saccade.dur) %>%
+    ungroup()->
+    z
+  
+  z %>%
+    mutate(issaccade=!is.na(sacnum)) %>%
+    filter(issaccade,saccade.dur>20) %>%
+    group_by(sacnum) %>%
+    mutate(cverg=abs(verg.velocity)>3,
+           cverg=replace(counter,cverg,NA)) %>%
+    mutate(peakFR=max(sdf20),
+           saccade.dur=first(saccade.dur), #was originally a summary
+           saccade.end=saccade.dur+bufferlength,
+           peak.conj.velocity=maxabs(conj.velocity),
+           peak.R.H= maxabs(rev),
+           peak.R.V= maxabs(revV),
+           peak.L.H= maxabs(lev),
+           peak.L.V= maxabs(levV),
+           R.H.Amp=rep[saccade.end]-rep[bufferlength],
+           L.H.Amp=lep[saccade.end]-lep[bufferlength],
+           R.V.Amp=repV[saccade.end]-repV[bufferlength],
+           L.V.Amp=lepV[saccade.end]-lepV[bufferlength],
+           r.angle=atan2(R.V.Amp,R.H.Amp)*180/pi,
+           r.amp=sqrt(R.H.Amp^2+R.V.Amp^2),
+           vect.amp= (sqrt(R.H.Amp^2+R.V.Amp^2)+sqrt(L.H.Amp^2+L.V.Amp^2))/2,
+           maxamp=max(abs(R.H.Amp),abs(R.V.Amp),abs(L.H.Amp),abs(L.V.Amp)),
+           verg.amp=verg.angle[saccade.end]-verg.angle[bufferlength],
+           mean.verg.amp=mean(verg.angle[saccade.end:n()]-mean(verg.angle[1:bufferlength])),
+           peak.verg.velocity= maxabs(verg.velocity),
+           min.verg.trans = min(verg.velocity),
+           max.verg.trans = max(verg.velocity),
+           off.verg.velocity=min(abs(min.verg.trans),abs(max.verg.trans)),
+           min.verg.angle=min(verg.angle),
+           max.verg.angle=max(verg.angle),
+           max.verg.velocity=max(verg.velocity),
+           min.verg.velocity=min(verg.velocity),
+           initial.verg.angle=verg.angle[bufferlength],
+           verg.lead=bufferlength-max(cverg[100:bufferlength],na.rm=T),
+           verg.lead=replace(verg.lead,is.na(verg.lead),0),
+           total.verg.amp=last(verg.angle)-first(verg.angle))->
+    z
+  # z<- mutate(z,verg.bins=cut(verg.amp,c(-50,-1,1,50)))
+  
+  z<- mutate(z,verg.bins=cut(verg.amp,c(-50,-5,5,50)))
+  
+  levels(z$verg.bins)<- c('Diverging','Conjugate','Converging')
+  
+  z %>%
+    group_by(sacnum) %>%
+    mutate(enhance.type='slowC',
+           enhance.type=replace(enhance.type,!realsaccade&verg.velocity<0,'slowD'),
+           enhance.type=replace(enhance.type,realsaccade & verg.velocity>0, 'converging'),
+           enhance.type=replace(enhance.type,realsaccade & verg.velocity<0, 'diverging'))->
+    z
+}
+
+markSlowVerg<- function(v, highthresh=6,lowthresh=2,rejectthresh=30,min.dur=5){
+  
+  require(dplyr)
+  require(data.table) #for rbindlist - a fast version of do.call('rbind') that uses data.table
+  datalength<-length(v)
+  i<-which(abs(v)>lowthresh) #find all the times when speed is above the lower threshold
+  
+  sacoff<-which(diff(i)>1) #sacoff now contains the indices of the ends of all the saccades
+ 
+  sacon<-c(1,sacoff+1) #first saccade always starts at first index
+  sacoff<-c(sacoff,length(i)) #end of last saccade is always at the end
+  event.onset<-i[sacon] #Convert from the indices to actual times
+  event.offset<-i[sacoff] 
+  
+
+  stimes<- data.frame(event.onset,event.offset) 
+
+  jsac<- function(stimes){
+    summary(stimes)
+    #input should be an array of length 4: c(onsettime,offsettime, saccade.number,saccade.dur)
+    df<- data.frame(time=stimes[[1]]:stimes[[2]])
+    df$event<- stimes[[4]]
+    df$event.dur<- stimes[[3]]
+    return(df)
+    # return(stimes[[1]]:stimes[[2]])
+  }
+  
+  stimes %>%
+    mutate(dur=event.offset-event.onset, #calculate duration of each saccade
+           s=row_number())-> #assign an ID number to each saccade
+    stimes
+  
+  x<-rbindlist(apply(stimes,1,jsac)) 
+  
+  v<- data.frame(v=v) #Make the original velocity trace into a data.frame
+  v<- mutate(v, time=row_number()) 
+  xx<- left_join(v,x,by='time')
+  
+  xx %>%
+    group_by(event) %>% #This means we analyze each saccade individually
+    mutate(max.vel=max(abs(v)), #calculate max velocity
+           dur=n()) %>% #calculate duration
+    filter(max.vel>highthresh, #reject all saccades that fail to exceed the large threshold
+           max.vel<rejectthresh, #reject all movements that exceed the rejection thresh (prob saccades)
+           dur>min.dur)-> #reject all saccades that fail to exceed the minimum duration
+    xm #xm is a summary which means it just lists the saccades and their measured values
+  
+  
+  
+  xx %>% #go back to the full data set and now reject all the saccades that were rejected above
+    filter(event %in% unique(xm$event)) %>% 
+    dplyr::select(time,event) -> #All we need is the time and the eventID
+    g
+  
+  g<- left_join(select(xx,time),g,by='time')
+  
+  g$event #return just an array of the IDs of saccades and fixations
+  
+  
+}
+
+preparetoBOOTslow<- function(z){
+  
+  z%>% #this block smooths out velocity traces
+    mutate(lev=parabolicdiff(lep,20),
+           rev=parabolicdiff(rep,20),
+           #levV=parabolicdiff(lepV,20),
+           #revV=parabolicdiff(repV,20),
+           sdf=spikedensity(rasters,10),
+           verg.velocity=lev-rev,
+           conj.velocity=sqrt(((rev+lev)/2)^2+((revV+levV)/2)^2))->
+    z
+  
+d=10
+
+  z %>% #this is just one neuron's worth of data
+    mutate(sdf20=lag(sdf,d),
+           time=row_number(),
+           slowverg=markSlowVerg(verg.velocity,
+                                 highthresh = 8,
+                                 lowthresh=4,
+                                 rejectthresh=50,
+                                 min.dur=150)) %>%
+    group_by(slowverg) %>%
+    mutate(dur=n(),
+           counter=time-first(time)) %>%
+    ungroup()->
+    z
+  
+  z %>%
+    mutate(issaccade=!is.na(slowverg)) %>%
+    filter(issaccade,dur<1000) %>%
+    group_by(slowverg) %>%
+    mutate(peakFR=max(sdf20),
+           verg.amp=last(verg.angle)-first(verg.angle),
+           peak.conj.velocity=maxabs(conj.velocity))->
+    z
+  # z<- mutate(z,verg.bins=cut(verg.amp,c(-50,-1,1,50)))
+  
+  z<- mutate(z,verg.bins=cut(verg.amp,c(-50,-0.5,0.5,50)))
+  
+  levels(z$verg.bins)<- c('Diverging','Conjugate','Converging')
+  
+  z
+  
+}
+
+bootstrapSaccadesOK<- function(n){
+  #n is just a label that is added. This function is run multiple times
+  #using different random samples each time 
+  get('z') #get from global environment
+  #randomly pick from the list of saccades of each type. Replace=true means that
+  #we can get the same number multiple times
+  samp <- sample(unique(z$sacnum[z$verg.bins=='Converging']), 
+                 length(unique(z$sacnum[z$verg.bins=='Converging'])), replace = TRUE)
+  
+  samp <- c(samp,sample(unique(z$sacnum[z$verg.bins=='Diverging']), 
+                        length(unique(z$sacnum[z$verg.bins=='Diverging'])), replace = TRUE))
+  #convert to data.table for faster processing
+  z <- as.data.table(z)
+  setkey(z, "sacnum") #like group_by
+  # create the new data set
+  z <- z[J(samp), allow.cartesian = TRUE] #replicate data set based on above sample 
+  
+  z %>% #make the model
+    filter(abs(verg.velocity)<200) %>%
+    do(tidy(lm(sdf20~verg.angle+verg.velocity,data=.))) %>%
+    # do(tidy(lm(sdf20~lep+rep+lev+rev,data=.))) %>%
+    mutate(repN=n)-> #add the number of the bootstrap iteration. 
+    z
+}
+
+
+bootstrapSlowverg<- function(n,z){
+  #n is just a label that is added. This function is run multiple times
+  #using different random samples each time 
+  # get('z') #get from global environment
+  #randomly pick from the list of saccades of each type. Replace=true means that
+  #we can get the same number multiple times
+  samp <- sample(unique(z$slowverg[z$verg.bins=='Converging']), 
+                 length(unique(z$slowverg[z$verg.bins=='Converging'])), replace = TRUE)
+  
+  samp <- c(samp,sample(unique(z$slowverg[z$verg.bins=='Diverging']), 
+                        length(unique(z$slowverg[z$verg.bins=='Diverging'])), replace = TRUE))
+  #convert to data.table for faster processing
+  z <- as.data.table(z)
+  setkey(z, "slowverg") #like group_by
+  # create the new data set
+  z <- z[J(samp), allow.cartesian = TRUE] #replicate data set based on above sample 
+  
+  z %>% #make the model
+    filter(abs(verg.velocity)<200) %>%
+    do(tidy(lm(sdf20~verg.angle+verg.velocity,data=.))) %>%
+    # do(tidy(lm(sdf20~lep+rep+lev+rev,data=.))) %>%
+    mutate(repN=n)-> #add the number of the bootstrap iteration. 
+    z
+}
+
+```
+
+```{r}
+# t<- loadnewcsv2(path="C:/Users/setup/Desktop/NRTP Vergence/SOASTRAB/bootstraptest/")
+t<- loadnewcsv2(path="C:/Users/setup/Desktop/NRTP Vergence/SOA Strabismus/")
+```
+
+```{r,warning=FALSE}
+nreps=19 #number of bootstrap iterations
+n<- matrix(1:nreps) #set this up in the proper form to work with apply below
+# t<- readRDS('SOA.RDS')
+
+neurons=unique(t$neuron)
+neurons='Patos-102'
+xx<- NULL
+for (i in 1:length(neurons)){
+  # for(i in 1:2){
+  message(paste('Processing: ',neurons[i]))
+  z <- filter(t,neuron==neurons[i])
+  z<-preparetoBOOTmarksaccs(z) #marks and measures saccades
+  if (nrow(z)>0){
+    x<- as.data.frame(rbindlist(apply(n,1,bootstrapSaccadesOK))) #calls the function n times
+    x<- mutate(x,neuron=neurons[i]) 
+    xx[[i]]<- x #add to list for combining in next phase
+  }
+}
+
+xx<- rbindlist(xx) #combine efficiently (from data.table)
+
+# saveRDS(xx,'SOA simple Bootstrap analysis 1999reps.RDS')
+xx %>%
+  group_by(neuron,term) %>%
+  summarize(ciLOW=quantile(estimate,probs=0.025),
+            ciHIGH=quantile(estimate,probs=0.975),
+            m=mean(estimate)) %>%
+  mutate(zerocross=(ciLOW*ciHIGH)<0)->
+  confints
+
+confints %>%
+  select(neuron,term,m) %>%
+  spread(term,m)->
+  ciplot
+
+confints %>%
+  select(neuron,term,ciLOW) %>%
+  spread(term,ciLOW)->
+  ci.low
+names(ci.low)<-paste(names(ci.low),'low',sep='.')
+
+confints %>%
+  select(neuron,term,ciHIGH) %>%
+  spread(term,ciHIGH)->
+  ci.high
+names(ci.high)<-paste(names(ci.high),'high',sep='.')
+
+ciplot<-cbind(ciplot,ci.low,ci.high)
+```
+
+```{r}
+
+ggplot(ciplot,aes(verg.velocity,verg.angle))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  geom_text(aes(label=neuron))
+
+ggplot(ciplot,aes(verg.velocity,verg.angle))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')
+
+ kable(select(ciplot,neuron,verg.velocity.low,verg.velocity.high))
+ 
+ ciplot %>%
+   filter(verg.velocity.low*verg.velocity.high>0)%>%
+   ggplot(aes(verg.velocity,verg.angle))+
+   geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+   geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+   geom_point(size=1,color='hotpink')+
+   geom_vline(xintercept = 0)+
+   # coord_fixed()+
+   # geom_text(aes(label=neuron))+
+   theme_minimal()+
+   xlab('Sensitivity to Vergence Velocity')+
+   ylab('Sensitivity to Vergence Angle')+
+  geom_text(aes(label=neuron))
+```
+
+```{r}
+#Bootstrap Histogram----
+chosenCell='QT-101'
+
+x<- filter(xx,neuron=='QT-101')
+
+ciplot %>%
+  filter(neuron==chosenCell) %>%
+  select(neuron,verg.velocity.low,verg.velocity.high) ->
+  bootplot
+
+qplot(data=filter(x,term %in% c('verg.angle','verg.velocity')),
+      estimate,binwidth=0.005,fill=term)
+
+qplot(data=filter(x,term %in% c('verg.velocity')),
+      estimate,binwidth=0.005,fill=term)
+
+
+x$term<- as.factor(x$term)
+levels(x$term)<-c('b','Vergence Angle','Vergence Velocity')
+
+#get ciplot from next section
+ggplot(filter(x,term %in% c('Vergence Velocity')))+
+  geom_histogram(aes(estimate,fill=term),
+                 binwidth=0.01,
+                 color='white',
+                 size=0.5)+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity (spk/s)/(deg/s)')+
+  ylab('Number of Bootstrap Iterations')+
+  # geom_segment(aes(x=verg.velocity.low,xend=verg.velocity.high),data=bootplot,
+  #              y=-10,yend=-10,size=3,color='#00BFC4')+
+  geom_segment(aes(x=verg.velocity.low,xend=verg.velocity.high),data=bootplot,
+               y=-10,yend=-10,size=3,color='#F8766D')+
+  theme(legend.position=c(0.7,0.5),
+        legend.title=element_blank())+
+  ggtitle(paste0(chosenCell,' Bootstrap Confidence Interval'))
+```
+
+```{r,warning=FALSE}
+nreps=1999 #number of bootstrap iterations
+n<- matrix(1:nreps) #set this up in the proper form to work with apply below
+# t<- readRDS('SOA.RDS')
+
+neurons=unique(t$neuron)
+# neurons='Patos-101'
+neurons<- unique(filter(t,monkey!='Kopachuck')$neuron)
+xx<- NULL
+
+for (i in 1:length(neurons)){
+  # for(i in 1:2){
+  message(paste('Processing: ',neurons[i]))
+  z <- filter(t,neuron==neurons[i])
+  z<-preparetoBOOTslow(z) #marks and measures saccades
+  if (nrow(z)>0){
+    message(paste('Bootstrapping...: ',neurons[i]))
+    x<- as.data.frame(rbindlist(lapply(n,bootstrapSlowverg,z))) #calls the function n times
+    x<- mutate(x,neuron=neurons[i]) 
+    xx[[i]]<- x #add to list for combining in next phase
+  }else{
+    message(paste('No Slow Verg: ',neurons[i]))
+  }
+}
+
+xx<- rbindlist(xx) #combine efficiently (from data.table)
+
+# saveRDS(xx,'SOA simple Bootstrap analysis 1999reps.RDS')
+xx %>%
+  group_by(neuron,term) %>%
+  summarize(ciLOW=quantile(estimate,probs=0.025),
+            ciHIGH=quantile(estimate,probs=0.975),
+            m=mean(estimate)) %>%
+  mutate(zerocross=(ciLOW*ciHIGH)<0)->
+  confints
+
+confints %>%
+  select(neuron,term,m) %>%
+  spread(term,m)->
+  ciplot
+
+confints %>%
+  select(neuron,term,ciLOW) %>%
+  spread(term,ciLOW)->
+  ci.low
+names(ci.low)<-paste(names(ci.low),'low',sep='.')
+
+confints %>%
+  select(neuron,term,ciHIGH) %>%
+  spread(term,ciHIGH)->
+  ci.high
+names(ci.high)<-paste(names(ci.high),'high',sep='.')
+
+ciplot<-cbind(ciplot,ci.low,ci.high)
+```
+
+```{r}
+
+ggplot(ciplot,aes(verg.velocity,verg.angle))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  geom_text(aes(label=neuron))
+
+ggplot(ciplot,aes(verg.velocity,verg.angle))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')
+
+ kable(select(ciplot,neuron,verg.velocity.low,verg.velocity.high))
+```

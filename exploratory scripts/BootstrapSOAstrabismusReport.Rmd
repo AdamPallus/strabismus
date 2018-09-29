@@ -1,0 +1,408 @@
+---
+title: "Bootstrapping SOA in Strabismus"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+#Introduction
+
+We are trying to determine if SOA cells in strabismus are sensitive to vergence velocity. We fit a linear model that predicts firing rate based on the vergence angle, the vergence velocity and the vertical position of the eyes. The vertical position term was included to account for pattern strabismus, which is not encoded by SOA neurons according to previous work. 
+
+```{r echo=FALSE} 
+library(knitr)
+opts_chunk$set(echo=FALSE,message=FALSE,warning=FALSE,cache=FALSE)
+```
+
+```{r}
+library(dplyr)
+library(plotly)
+library(tidyr)
+xxSLOW<- readRDS('BootstrapSlowVertAdded3-12-2018.RDS')
+
+# xxBOTH<-readRDS('BootstrapBothEyesSaccades3-12-2018.RDS')
+# 
+# xxLEFT<- readRDS('BootstrapLEFTEyeSaccades3-12-2018.RDS')
+# xxRIGHT<- readRDS('BootstrapRIGHTEyeSaccades3-12-2018.RDS')
+
+
+
+xxBOTH<-readRDS('BootstrapSaccadesBoth3-12-2018.RDS')
+
+xxLEFT<-readRDS('BootstrapSaccadesLEFT3-12-2018.RDS')
+
+xxRIGHT<-readRDS('BootstrapSaccadesRIGHT3-12-2018.RDS')
+
+
+bootstrap.ci<- function(xx){
+  xx %>%
+    group_by(neuron,term) %>%
+    summarize(ciLOW=quantile(estimate,probs=0.025),
+              ciHIGH=quantile(estimate,probs=0.975),
+              m=median(estimate)) %>%
+    mutate(zerocross=(ciLOW*ciHIGH)<0)->
+    confints
+  
+  confints %>%
+    select(neuron,term,m) %>%
+    spread(term,m)->
+    ciplot
+  
+  confints %>%
+    select(neuron,term,ciLOW) %>%
+    spread(term,ciLOW)->
+    ci.low
+  names(ci.low)<-paste(names(ci.low),'low',sep='.')
+  
+  confints %>%
+    select(neuron,term,ciHIGH) %>%
+    spread(term,ciHIGH)->
+    ci.high
+  names(ci.high)<-paste(names(ci.high),'high',sep='.')
+  
+  ciplot<-cbind(ciplot,ci.low,ci.high)
+  
+  ciplot %>%
+    separate(neuron,c('monkey','cellnum'),remove=FALSE) %>%
+    mutate(strabismic=monkey %in% c('Kopachuck','Pilchuck','Patos','QT'),
+           exo=monkey %in% c('Pilchuck','Patos'),
+           eso= strabismic & !exo)->
+    ciplot
+}
+```
+
+#Results
+
+##Slow Vergence Movements
+
+```{r slow,message=FALSE,warning=FALSE}
+ciplot<- bootstrap.ci(xxSLOW)
+
+signif.position<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0)$neuron)
+signif.velocity<-unique(filter(ciplot,(verg.velocity.low*verg.velocity.high)>0)$neuron)
+signif.both<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0 & (verg.velocity.low*verg.velocity.high)>0)$neuron)
+
+
+ggplotly(
+ggplot(ciplot,aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('All cells')+
+  annotate('text',-2,5,label=paste0('n = ',nrow(ciplot)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.both) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant position and velocity sensitivity')+
+  annotate('text',-2,5,label=paste0('n = ',length(signif.both)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.velocity) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant position and velocity sensitivity')+
+  annotate('text',-2,5,label=paste0('n = ',length(signif.velocity)))
+)
+
+
+```
+
+###Significance Summary
+
+We analyzed `r nrow(ciplot)` cells and found that `r length(signif.both)` (`r round(length(signif.both)/nrow(ciplot),2)*100`%) had significant sensitivity to both vergence velocity and vergence position. A total of `r length(signif.position)` (`r round(length(signif.position)/nrow(ciplot),2)*100`%) cells showed significant sensitivity to vergence angle during slow vergence, while `r length(signif.velocity)` cells showed significant sensitivity to vergence velocity. It seems likely that we would get a better estimate of position sensitivity by analyzing the firing rates of neurons during fixation.
+
+There is a huge outlier in QT-103. It has very strong sensitivity to vergence angle, but a negative sensitivity to vergence velocity. I'm not sure what this means or if it is a real effect. It would suggest that the cell pauses during convergence movements but fires more when the eyes are converged, which is strange behavior. QT_2012_08_21_1104_Radial_Dump_AllSOAanalysis_EyeSpec.csv
+
+
+##Saccades with either eye viewing (no eye switching) includes normal
+
+```{r saccades both and normal,message=FALSE,warning=FALSE}
+ciplot<- bootstrap.ci(xxBOTH)
+
+
+signif.position<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0)$neuron)
+signif.velocity<-unique(filter(ciplot,(verg.velocity.low*verg.velocity.high)>0)$neuron)
+signif.both<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0 & (verg.velocity.low*verg.velocity.high)>0)$neuron)
+
+
+ggplotly(
+ggplot(ciplot,aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0,alpha=0.5)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5,alpha=0.5)+
+  geom_point(size=1,aes(color=strabismic))+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('All cells')+
+  annotate('text',-2,5,label=paste0('n = ',nrow(ciplot)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.both) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0,alpha=0.5)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5,alpha=0.5)+
+  geom_point(size=1,aes(color=strabismic))+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant position AND velocity sensitivity')+
+  annotate('text',-0.3,0,label=paste0('n = ',length(signif.both)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.velocity) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0,alpha=0.5)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5,alpha=0.5)+
+  geom_point(size=1,aes(color=strabismic))+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant velocity sensitivity')+
+  annotate('text',-0.5,-10,label=paste0('n = ',length(signif.velocity)))
+)
+
+
+```
+
+##Saccades with either eye viewing (no eye switching)
+
+```{r saccades both,message=FALSE,warning=FALSE}
+ciplot<- bootstrap.ci(xxBOTH)
+ciplot<- filter(ciplot,strabismic)
+
+signif.position<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0)$neuron)
+signif.velocity<-unique(filter(ciplot,(verg.velocity.low*verg.velocity.high)>0)$neuron)
+signif.both<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0 & (verg.velocity.low*verg.velocity.high)>0)$neuron)
+
+
+ggplotly(
+ggplot(ciplot,aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('All cells')+
+  annotate('text',-2,5,label=paste0('n = ',nrow(ciplot)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.both) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant position AND velocity sensitivity')+
+  annotate('text',-0.3,0,label=paste0('n = ',length(signif.both)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.velocity) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant velocity sensitivity')+
+  annotate('text',-0.5,-10,label=paste0('n = ',length(signif.velocity)))
+)
+
+
+```
+
+###Significance Summary
+
+We analyzed `r nrow(ciplot)` cells that had sufficiently many saccades without eye switches and found that `r length(signif.both)` (`r round(length(signif.both)/nrow(ciplot),2)*100`%) had significant sensitivity to both vergence velocity and vergence position. A total of `r length(signif.position)` (`r round(length(signif.position)/nrow(ciplot),2)*100`%) cells showed significant sensitivity to vergence angle during these saccades, while `r length(signif.velocity)` cells showed significant sensitivity to vergence velocity. 
+
+
+##Saccades with the LEFT eye viewing (no eye switching)
+
+```{r saccades LEFT,message=FALSE,warning=FALSE}
+ciplot<- bootstrap.ci(xxLEFT)
+ciplot<- filter(ciplot,strabismic)
+signif.position<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0)$neuron)
+signif.velocity<-unique(filter(ciplot,(verg.velocity.low*verg.velocity.high)>0)$neuron)
+signif.both<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0 & (verg.velocity.low*verg.velocity.high)>0)$neuron)
+
+
+ggplotly(
+ggplot(ciplot,aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('All cells')+
+  annotate('text',-.5,-10,label=paste0('n = ',nrow(ciplot)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.both) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant position AND velocity sensitivity')+
+  annotate('text',-0.1,2,label=paste0('n = ',length(signif.both)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.velocity) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant velocity sensitivity')+
+  annotate('text',0.25,10,label=paste0('n = ',length(signif.velocity)))
+)
+
+
+```
+
+###Significance Summary
+
+We analyzed `r nrow(ciplot)` cells that had sufficiently many saccades with the left eye viewing and found that `r length(signif.both)` (`r round(length(signif.both)/nrow(ciplot),2)*100`%) had significant sensitivity to both vergence velocity and vergence position. A total of `r length(signif.position)` (`r round(length(signif.position)/nrow(ciplot),2)*100`%) cells showed significant sensitivity to vergence angle during these saccades, while `r length(signif.velocity)` cells showed significant sensitivity to vergence velocity. 
+
+
+
+##Saccades with the RIGHT eye viewing (no eye switching)
+
+```{r saccades RIGHT,message=FALSE,warning=FALSE}
+ciplot<- bootstrap.ci(xxRIGHT)
+ciplot<- filter(ciplot,strabismic)
+signif.position<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0)$neuron)
+signif.velocity<-unique(filter(ciplot,(verg.velocity.low*verg.velocity.high)>0)$neuron)
+signif.both<- unique(filter(ciplot,(verg.angle.low*verg.angle.high)>0 & (verg.velocity.low*verg.velocity.high)>0)$neuron)
+
+
+ggplotly(
+ggplot(ciplot,aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('All cells')+
+  annotate('text',-0.5,0,label=paste0('n = ',nrow(ciplot)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.both) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant position AND velocity sensitivity')+
+  annotate('text',-0.2,2,label=paste0('n = ',length(signif.both)))
+)
+
+ggplotly(
+  ciplot %>%
+    filter(neuron %in% signif.velocity) %>%
+ggplot(aes(verg.velocity,verg.angle,label=neuron))+
+  geom_errorbar(aes(ymin=verg.angle.low,ymax=verg.angle.high),size=0.5,width=0)+
+  geom_errorbarh(aes(xmin=verg.velocity.low,xmax=verg.velocity.high),height=0,size=0.5)+
+  geom_point(size=1,color='hotpink')+
+  geom_vline(xintercept = 0)+
+  # coord_fixed()+
+  # geom_text(aes(label=neuron))+
+  theme_minimal()+
+  xlab('Sensitivity to Vergence Velocity')+
+  ylab('Sensitivity to Vergence Angle')+
+  ggtitle('Cells with significant velocity sensitivity')+
+  annotate('text',-0.5,-10,label=paste0('n = ',length(signif.velocity)))
+)
+
+
+```
+
+###Significance Summary
+
+We analyzed `r nrow(ciplot)` cells that had sufficiently many saccades with the right eye viewing and found that `r length(signif.both)` (`r round(length(signif.both)/nrow(ciplot),2)*100`%) had significant sensitivity to both vergence velocity and vergence position. A total of `r length(signif.position)` (`r round(length(signif.position)/nrow(ciplot),2)*100`%) cells showed significant sensitivity to vergence angle during these saccades, while `r length(signif.velocity)` cells showed significant sensitivity to vergence velocity. 

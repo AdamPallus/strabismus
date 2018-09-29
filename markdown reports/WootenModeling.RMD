@@ -1,0 +1,373 @@
+---
+title: "Modeling Vergence Pursuit using SOA Neurons"
+author: "Adam Pallus"
+output:
+  pdf_document: default
+html_document: default
+---
+
+```{r echo=FALSE} 
+library(knitr)
+opts_chunk$set(echo=FALSE,message=FALSE,warning=FALSE,cache=FALSE)
+```
+
+```{r,message=FALSE,echo=FALSE}
+
+library(ggplot2)
+library(dplyr)
+library(knitr)
+library(tidyr)
+library(broom)
+# library(grid)
+library(relaimpo)
+library(leaps)
+library(stringr)
+library(cladoRcpp)
+library(boot)
+source('Adamhelperfunctions.R')
+select<- dplyr::select
+```
+
+```{r quickload,echo=FALSE}
+
+o<- NULL
+t<- loadnewcsv2(path="C:/Users/setup/Desktop/NRTP Vergence/WOOTEN/",
+               referencefile=o)
+
+
+```
+#Results
+```{r basic plots}
+
+t %>%
+  group_by(neuron) %>%
+  mutate( rev=parabolicdiff(rep,10),
+          lev=parabolicdiff(lep,10),
+          verg.velocity=lev-rev,
+          # target.vergence=thp2-thp,
+          # target.vergence=as.vector(smooth(target.vergence,kind='3RS3R')),
+          # target.vergence.velocity=parabolicdiff(target.vergence,n=30),
+          sdf=spikedensity(rasters,15),
+          showrasters=replace(rasters,rasters==0,NA),
+          time=row_number(),
+          sdf20=lag(sdf,20))->
+  t
+
+# ggplot(filter(t,time>50000,time<100000))+
+#   geom_line(aes(time,target.vergence))+
+#   geom_line(aes(time,verg.angle),color='darkgreen')+
+#   geom_point(aes(time,showrasters+15),shape='|')+
+#   # geom_area(aes(time,sdf20),alpha=0.2)+
+#   theme_bw()+
+#   facet_wrap(~neuron)
+# 
+# ggplot(filter(t,time>50000,time<100000))+
+#   geom_line(aes(time,target.vergence.velocity))+
+#   geom_line(aes(time,verg.velocity),color='darkblue')+
+#     geom_point(aes(time,showrasters+15),shape='|')+
+#   # geom_line(aes(time,sdf20-25),alpha=0.2)+
+#   theme_bw()+
+#   ylim(c(-25,25))+
+#   facet_wrap(~neuron)
+# 
+# ggplot(filter(t,time>55000,time<70000))+
+#   geom_line(aes(time,target.vergence.velocity))+
+#   geom_line(aes(time,verg.velocity),color='darkblue')+
+#     geom_point(aes(time,showrasters+15),shape='|')+
+#   # geom_line(aes(time,sdf20-25),alpha=0.2)+
+#   theme_bw()+
+#   ylim(c(-25,25))+
+#   facet_wrap(~neuron)
+# 
+# ggplot(filter(t,time>55000,time<70000))+
+#   geom_line(aes(time,target.vergence.velocity))+
+#   geom_line(aes(time,as.vector(sma(verg.velocity,order=40,silent='all')$fitted)),color='darkblue')+
+#     geom_point(aes(time,showrasters+15),shape='|')+
+#   # geom_line(aes(time,sdf20-25),alpha=0.2)+
+#   theme_bw()+
+#   ylim(c(-25,25))+
+#   facet_wrap(~neuron)
+
+# m<- lm(sdf20~verg.velocity+verg.angle,data=t)
+# summary(m)
+
+```
+
+First we used a simple linear model to predict firing rate based on vergence angle and vergence velocity during pursuit. We created a spike density function by convolving the spike rasters with a gaussian kernal with a 15ms standard deviation and introduced a 20ms lag for each cell. 
+
+Next, we calculated the relative importance of vergence position and vergence velocity in the model for each cell and plot them below: 
+
+```{r simple model}
+model.formula="sdf20~verg.angle+verg.velocity"
+# model.formula="sdf20~verg.velocity"
+t %>%
+  group_by(neuron) %>%
+  do(mod=lm(model.formula,data=.))->
+  z
+
+z %>%
+  glance(mod) %>%
+  separate(neuron,c('monkey','cellnum'),remove=FALSE)->
+  zg
+
+z %>%
+  tidy(mod)%>%
+  select(neuron,term,estimate) %>%
+  mutate(term=replace(term,term=='(Intercept)','b')) %>%
+  spread(term,estimate)->
+  zt
+
+z %>%
+  # filter(neuron=='Wooten-101') %>%
+  mutate(imp.verg.angle=calc.relimp(mod)$lmg[1],
+         imp.verg.velocity=calc.relimp(mod)$lmg[2])%>%
+  separate(neuron,c('monkey','cellnum'),remove=FALSE)%>%
+  select(-mod)->
+  zz
+
+zz$r.squared=zg$r.squared
+
+qplot(imp.verg.angle,imp.verg.velocity,data=zz)+
+  geom_abline()+
+  xlim(0,1)+
+  ylim(0,1)+
+  xlab('Importance of Vergence Angle')+
+  ylab('Importance of Vergence Velocity')
+
+ggplot(aes(imp.verg.angle,imp.verg.velocity),data=zz)+
+  xlim(0,1)+
+  ylim(0,1)+
+  geom_text(aes(label=as.integer(cellnum)-100),alpha=0.2)+
+  geom_abline()
+
+```
+
+None of the cells are found to have vergence velocity as an important factor for predicting firing rate. 
+
+## Modeling Vergence Angle
+
+Since none of the cells are particularly sensitive to vergence velocity, we will choose the cell that best encodes vergence angle: Cell # 16 from July 31st 1427_Zaber
+
+We predict vergence angle as a function of the spike density function described above using a simple linear regression.
+
+```{r modelusingFR }
+
+w<- filter(t,neuron=='Wooten-116')
+
+mod<- lm(verg.angle~sdf20,data=w)
+
+w<- mutate(w,
+           predA=predict(mod,newdata=w))
+
+VAF<- function(mod,x,param='verg.velocity'){
+  
+  x<- mutate(x,predV=predict(mod,newdata=x))
+  result=1-var(x$predV-x[param],na.rm=T)/var(x[param],na.rm=T)
+  as.numeric(result)
+}
+
+v<- VAF(mod,w,param='verg.angle')
+
+predict.plot<-w %>%
+  filter(time>0,
+         time<200000) %>%
+  ggplot()+
+  geom_line(aes(time,predA),color='orange')+
+  geom_line(aes(time,verg.angle),alpha=0.5)+
+  theme_minimal()+
+  ylab('Vergence Angle (deg)')+
+  annotate('text',x=25000,y=-1,label=paste('VAF = ',round(v,3),sep=''))
+
+predict.plot
+
+# ggsave('WootenModelVergAnglePursuit.pdf',plot=predict.plot,height=6,width=20)
+
+predict.plot<-w %>%
+  filter(time>110000,
+         time<150000) %>%
+  ggplot()+
+  geom_line(aes(time,predA),color='orange')+
+  geom_line(aes(time,verg.angle),alpha=0.5)+
+  theme_minimal()+
+  ylab('Vergence Angle (deg)')+
+  annotate('text',x=120000,y=-1,label=paste('VAF = ',round(v,3),sep=''))
+
+predict.plot
+
+# ggsave('WootenModelVergAnglePursuitzoom.pdf',plot=predict.plot,height=6,width=20)
+```
+
+
+It seems that the model does quite well, with a VAF approaching 0.8, but the model seems to be slightly ahead of the actual data (black). 
+
+To improve the model, we can find the lead time that produces the best fit:
+
+```{r dynamiclead}
+
+dynamiclead<-function(p,lags=seq(10,300,by=10),formula='rev+lev') {
+  
+  # formula=paste('sdflag~',formula)
+  
+  rsq<-NULL
+  for (i in 1:length(lags)) {
+    if (lags[i] > 0){
+      p$sdflag<-dplyr::lag(p$sdf,lags[i])
+    }
+    else{
+      p$sdflag<-dplyr::lead(p$sdf,lags[i]*-1)
+    }
+    
+    rsq[i]<- summary(lm(formula=formula,data=p))$r.squared
+  }
+  return(rsq)
+  # return(lags[rsq==max(rsq)])
+  # bestlag=lags[rsq==max(rsq)]
+  # p$dynamiclead<- bestlag
+  # if (bestlag > 0){
+  #   p$sdflag<-dplyr::lag(p$sdf,bestlag)
+  # }
+  # else{
+  #   p$sdflag<-dplyr::lead(p$sdf,bestlag*-1)
+  # }
+  # return(p)
+  
+}
+
+d<-dynamiclead(w,lags=seq(1,201,by=2),formula='sdflag~verg.angle')
+lags=seq(1,201,by=2)
+bestlag<- lags[d==max(d)]
+qplot(lags,d)+
+  geom_vline(xintercept = bestlag)
+
+w<- mutate(w,
+           sdfdynamic=lag(sdf,bestlag))
+
+mod<- lm(verg.angle~sdfdynamic,data=w)
+
+w<- mutate(w,
+           predAdynamic=predict(mod,newdata=w))
+
+v<- VAF(mod,w,param='verg.angle')
+
+predict.plot<-w %>%
+  filter(time>0,
+         time<200000) %>%
+  ggplot()+
+  geom_line(aes(time,predAdynamic),color='orange')+
+  geom_line(aes(time,verg.angle),alpha=0.5)+
+  theme_minimal()+
+  ylab('Vergence Angle (deg)')+
+  annotate('text',x=25000,y=-1,label=paste('VAF = ',round(v,3),'\nLatency = ',bestlag,' ms',sep=''))
+
+predict.plot
+
+predict.plot<-w %>%
+  filter(time>110000,
+         time<150000) %>%
+  ggplot()+
+  geom_line(aes(time,predAdynamic),color='orange')+
+  geom_line(aes(time,verg.angle),alpha=0.5)+
+  theme_minimal()+
+  ylab('Vergence Angle (deg)')+
+  annotate('text',x=120000,y=2,label=paste('VAF = ',round(v,3),'\nLatency = ',bestlag,' ms',sep=''))+
+  theme(axis.text.x = element_blank())
+
+predict.plot
+
+eyes.plot<- w %>%
+  filter(time>110000,
+         time<150000) %>%
+  ggplot()+
+  geom_line(aes(time,rep),color='red')+
+  geom_line(aes(time,lep),color='blue')+
+  theme_minimal()+
+  ylab('Horizontal Eye Position (deg)')+
+  theme(axis.text.x = element_blank())
+
+spikes.plot<- w %>% 
+  filter(time>110000,
+         time<150000) %>%
+  ggplot()+
+  geom_area(aes(time,sdf))+
+  ylab('Firing Rate (spk/s)')+
+  theme_minimal()
+
+multiplot(eyes.plot,predict.plot,spikes.plot)
+
+```
+
+The model now has a 187ms lead time, which is quite long, but it appears to fit the data better, and this is reflected in a higher VAF. Despite this, there is still noise that occurs when the firing rate is low. This might be due to the kernerl of the spike density function being too narrow. We will try increasing it to 30ms:
+
+
+```{r smootheddynamic}
+
+w<- mutate(w,
+       sdf=spikedensity(rasters,sd=30))
+
+
+d<-dynamiclead(w,lags=seq(1,201,by=2),formula='sdflag~verg.angle')
+
+bestlag<- lags[d==max(d)]
+qplot(lags,d)+
+  geom_vline(xintercept = bestlag)
+
+w<- mutate(w,
+           sdfdynamic=lag(sdf,bestlag))
+
+mod<- lm(verg.angle~sdfdynamic,data=w)
+
+w<- mutate(w,
+           predAdynamic=predict(mod,newdata=w))
+
+v<- VAF(mod,w,param='verg.angle')
+
+predict.plot<-w %>%
+  filter(time>0,
+         time<200000) %>%
+  ggplot()+
+  geom_line(aes(time,predAdynamic),color='orange')+
+  geom_line(aes(time,verg.angle),alpha=0.5)+
+  theme_minimal()+
+  ylab('Vergence Angle (deg)')+
+  annotate('text',x=25000,y=-1,label=paste('VAF = ',round(v,3),'\nLatency = ',bestlag,' ms',sep=''))
+
+predict.plot
+
+predict.plot<-w %>%
+  filter(time>110000,
+         time<150000) %>%
+  ggplot()+
+  geom_line(aes(time,predAdynamic),color='orange')+
+  geom_line(aes(time,verg.angle),alpha=0.5)+
+  theme_minimal()+
+  ylab('Vergence Angle (deg)')+
+  annotate('text',x=120000,y=2,label=paste('VAF = ',round(v,3),'\nLatency = ',bestlag,' ms',sep=''))+
+  theme(axis.text.x = element_blank())
+
+predict.plot
+
+eyes.plot<- w %>%
+  filter(time>110000,
+         time<150000) %>%
+  ggplot()+
+  geom_line(aes(time,rep),color='red')+
+  geom_line(aes(time,lep),color='blue')+
+  theme_minimal()+
+  ylab('Horizontal Eye Position (deg)')+
+  theme(axis.text.x = element_blank())+
+  xlab('')
+
+spikes.plot<- w %>% 
+  filter(time>110000,
+         time<150000) %>%
+  ggplot()+
+  geom_area(aes(time,sdf))+
+  ylab('Firing Rate (spk/s)')+
+  theme_minimal()
+```
+
+```{r multifinal,fig.height=9,fig.width=6}
+multiplot(eyes.plot,predict.plot+xlab(''),spikes.plot)
+
+```
+
